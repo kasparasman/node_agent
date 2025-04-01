@@ -230,11 +230,10 @@ function monitorAudioTrack(event) {
                     lastAudioBytesReceived = reportData.bytesReceived;
                     logger.debug(`updated lastAudioBytesReceived: ${lastAudioBytesReceived}`);
                     logger.debug(`elapsedSeconds: ${elapsedSeconds}`);
-                    const bitrate = (bytesDelta * 8) / elapsedSeconds;
-                    currentAudioBitrate = bitrate;
+                    const currentAudioBitrate = (bytesDelta * 8) / elapsedSeconds;
                     logger.debug(`audio bitrate: ${currentAudioBitrate}`);
                     // Check state transitions for audio.
-                    if (bitrate < IDLE_AUDIO_BITRATE_THRESHOLD) {
+                    if (currentAudioBitrate < IDLE_AUDIO_BITRATE_THRESHOLD) {
                         if (audioIsPlaying !== false) {
                             // logger.info(`[Monitor-Audio] Transitioning to idle (bitrate ${bitrate.toFixed(2)} bps).`);
                             audioIsPlaying = false;
@@ -375,7 +374,7 @@ async function createPeerConnection(ctx, offer, iceServers) {
                         }
                     };
                     monitorAudioTrack(event);
-                    const audioActive = await waitForTrackBitrate('audio', IDLE_AUDIO_BITRATE_THRESHOLD, 5000);
+                    const audioActive = await waitForTrackBitrate('audio', IDLE_AUDIO_BITRATE_THRESHOLD, 1000);
                     if (!audioActive) {
                         logger.info("[LiveKit] audio track bitrate did not reach threshold; skipping publish.");
                         return;

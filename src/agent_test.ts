@@ -13,13 +13,12 @@ import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 import { Pinecone } from '@pinecone-database/pinecone';
 import { VideoFrame, VideoBufferType, TrackPublishOptions } from '@livekit/rtc-node';
-
+import zmq from 'zeromq';
 import { LocalVideoTrack, VideoStream, Track, VideoSource, TrackSource, AudioFrame, AudioSource, LocalAudioTrack } from '@livekit/rtc-node';
 //@ts-ignore
 import pkg from '@roamhq/wrtc';
 const { RTCPeerConnection, MediaStream, RTCRtpSender } = pkg;
 const { RTCVideoSink, RTCAudioSink } = pkg.nonstandard;
-
 import WebSocket from "ws";
 import sdpTransform from 'sdp-transform';
 import fs from 'fs'; // Added for latency logging
@@ -27,7 +26,78 @@ import fs from 'fs'; // Added for latency logging
 // ====================================================
 // Latency Logging Setup
 // ====================================================
-// Create (or append to) a log file in the same directory.
+
+let audioStreamStarted = false;
+let audioStreamFinished = false;
+let audioStreamFinishedResolve;
+let audioStreamFinishedPromise = new Promise((resolve) => { 
+  audioStreamFinishedResolve = resolve; 
+});
+async function sendEOF(): Promise<void> {
+  console.info("[Audio] Sending EOF signal to router.");
+  await zmqDealer.send(Buffer.from("EOF"));
+  // Wait for router reply (e.g., "EOF" or similar acknowledgment).
+  const [reply] = await zmqDealer.receive();
+  console.info("[Audio] Received EOF reply from router:", reply.toString());
+}
+
+let zmqDealer: zmq.Dealer;
+async function initZmqDealer(): Promise<void> {
+  zmqDealer = new zmq.Dealer();
+  await zmqDealer.connect("ipc:///tmp/router_dealer_stream.ipc");
+  console.info("ZeroMQ DEALER connected to ipc:///tmp/router_dealer_stream.ipc");
+}
+
+async function processAudioFrame(frameBuffer: Buffer): Promise<void> {
+  // Send the frame and wait for the echoed reply.
+  await zmqDealer.send(frameBuffer);
+  //const [reply] = await zmqDealer.receive();
+  //return reply;
+}
+// --- Revised Audio Processing ---
+// This function now converts incoming float PCM samples to int16,
+// sends the processed frame via ZeroMQ, and (optionally) captures it for local playback.
+async function handleIncomingAudio(data: any, livekitAudioSource: AudioSource): Promise<void> {
+  try {
+    const floatSamples = data.samples;
+    const int16Samples = new Int16Array(floatSamples.length);
+    let frameIsEmpty = true;
+    for (let i = 0; i < floatSamples.length; i++) {
+      // Convert sample to int16 with clamping and rounding.
+      const sample = Math.round(Math.max(-1, Math.min(1, floatSamples[i])) * 32767);
+      int16Samples[i] = sample;
+      // Check if sample is non-zero (using a small threshold to avoid floating point noise)
+      if (Math.abs(sample) > 1) {
+        frameIsEmpty = false;
+      }
+    }
+    const frameBuffer = Buffer.from(int16Samples.buffer);
+
+    // Mark the stream as started if this frame is not empty.
+    if (!audioStreamStarted && !frameIsEmpty) {
+      audioStreamStarted = true;
+      console.info("[Audio] Audio stream started.");
+    }
+
+    // If the stream has started and we now get an empty frame, trigger EOF.
+    if (audioStreamStarted && frameIsEmpty && !audioStreamFinished) {
+      audioStreamFinished = true;
+      console.info("[Audio] Empty frame detected after stream started, assuming stream end.");
+      await sendEOF();
+      // Resolve the promise so the main processing loop can continue.
+      if (audioStreamFinishedResolve) {
+        audioStreamFinishedResolve();
+      }
+      return; // Do not process this (empty) frame further.
+    }
+
+    // Otherwise, process the frame normally.
+    await processAudioFrame(frameBuffer);
+  } catch (err) {
+    console.error("Error processing audio frame via ZeroMQ:", err);
+  }
+}
+
 async function pineconePingLoop() {
   while (true) {
     try {
@@ -294,15 +364,15 @@ async function createPeerConnection(ctx: JobContext, offer: RTCSessionDescriptio
           // Create an RTCAudioSink on the incoming remote audio track.
           const audioSink = new RTCAudioSink(event.track);
           console.debug("[RTC] RTCAudioSink created for audio track:", event.track.id);
-          
           // Variables for throttling mismatch logs.
           let canLogMismatch = true;
           const mismatchLogThrottleMs = 5000; // Log mismatch once every 5 seconds
 
           let lastCaptureLogTime = 0;
           const captureLogThrottleMs = 5000; // Log capture once every 5 seconds
-
+/*
           audioSink.ondata = (data) => {
+      
             try {
               // Check if the incoming data matches our expected configuration.
               if (data.sampleRate !== sampleRate || data.channelCount !== channelCount) {
@@ -338,8 +408,13 @@ async function createPeerConnection(ctx: JobContext, offer: RTCSessionDescriptio
             } catch (err) {
               console.error("Error during audio frame processing:", err);
             }
+          };*/
+
+          audioSink.ondata = async (data) => {
+            // Here, data contains the raw PCM samples and metadata.
+            await handleIncomingAudio(data, livekitAudioSource);
           };
-          
+    
           // Clean up the sink when the audio track ends.
           event.track.onended = () => {
             console.info("[RTC] Audio track ended. Stopping RTCAudioSink.");
@@ -417,7 +492,6 @@ async function createPeerConnection(ctx: JobContext, offer: RTCSessionDescriptio
           };
           const options = new TrackPublishOptions();
           options.source = TrackSource.SOURCE_CAMERA;
-
           // Publish the track.
           if (ctx.room && ctx.room.localParticipant) {
             const publication = await ctx.room.localParticipant.publishTrack(localVideoTrack, options);
@@ -549,6 +623,8 @@ export default defineAgent({
   entry: async (ctx: JobContext) => {
     const chatMessages: string[] = [];
   pineconePingLoop();
+  await initZmqDealer();
+
 
     // --- D-ID Initialization ---
     try {
@@ -767,10 +843,15 @@ export default defineAgent({
               logLatency("D-ID Stream Start", streamStartTime);
             }
             await new Promise(resolve => setTimeout(resolve, 100));
+
           }
         }
         console.info("[D-ID] Completed sending stream-text messages.");
       }
+      console.info("[Audio] Waiting for audio stream to complete...");
+      await audioStreamFinishedPromise;
+      console.info("[Audio] Audio stream finalized; continuing with further processing.");
+
     } catch (error) {
       console.error("[Loop] Error in main processing loop:", error);
     }

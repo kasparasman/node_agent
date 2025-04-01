@@ -1,5 +1,6 @@
 {
   "dependencies": {
+    "@discordjs/opus": "^0.10.0",
     "@livekit/agents": "^0.6.4",
     "@livekit/agents-plugin-openai": "^0.8.1",
     "@livekit/agents-plugin-silero": "^0.5.3",
@@ -19,8 +20,10 @@
     "sdp-transform": "^2.15.0",
     "soundtouchjs": "^0.1.30",
     "tsx": "^4.19.3",
+    "wavefile": "^11.0.0",
     "wrtc": "^0.4.7",
     "ws": "^8.18.0",
+    "zeromq": "^6.3.0",
     "zod": "^3.24.2"
   },
   "name": "argos_backend",
@@ -33,6 +36,7 @@
     "@types/ref-napi": "^3.0.12",
     "@types/sdp-transform": "^2.4.9",
     "@types/ws": "^8.5.14",
+    "node-pre-gyp": "^0.17.0",
     "ts-node": "^10.9.2",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3"
@@ -45,5 +49,18 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": ""
+  "description": "",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@discordjs/opus",
+      "canvas",
+      "esbuild",
+      "node-datachannel",
+      "onnxruntime-node",
+      "ref-napi",
+      "sharp",
+      "wrtc",
+      "zeromq"
+    ]
+  }
 }
